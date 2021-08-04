@@ -1,8 +1,7 @@
 import math
-from enum import auto, Enum
-from typing import Tuple, List, Type, Optional, TypeVar, Dict, Callable
+from enum import auto, Enum, unique
+from typing import Tuple, List, Type, Optional, TypeVar, Callable
 
-import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy import interpolate
@@ -61,21 +60,23 @@ def _filled(size: Tuple[int, ...], value=_T) -> np.ndarray:
     return out
 
 
+@unique
 class _WindingRule(Enum):
-    NON_ZERO = auto()
-    EVEN_ODD = auto()
+    def __new__(cls, keycode: int, is_in: Callable[[int], bool]) -> object:
+        obj = object.__new__(cls)
+        obj._value_ = keycode
+        obj.wn_is_in = is_in
+        return obj
+
+    EVEN_ODD = auto(), lambda x: (x % 2) == 1
+    NON_ZERO = auto(), lambda x: x == 0
 
 
-_is_in: Dict[_WindingRule, Callable[[int], bool]] = {
-    _WindingRule.EVEN_ODD: lambda x: (x % 2) == 1,
-    _WindingRule.NON_ZERO: lambda x: x == 0
-}
-
-
+@unique
 class _PointPolygonPosition(Enum):
     IN = auto()
     ON = auto()
-    NOT = auto()
+    OUT = auto()
 
 
 def _in_polygon(point: Tuple[float, float], xv: np.ndarray, yv: np.ndarray,
@@ -106,13 +107,12 @@ def _in_polygon(point: Tuple[float, float], xv: np.ndarray, yv: np.ndarray,
                 if _wn < 0:  # P right of  edge
                     wn -= 1  # have  a valid down intersect
 
-    return _PointPolygonPosition.IN if _is_in[rule](wn) else _PointPolygonPosition.NOT
+    return _PointPolygonPosition.IN if rule.wn_is_in(wn) else _PointPolygonPosition.OUT
 
 
 def curvature(image: np.ndarray, boundary_point: int = 10, bp_tangent: int = 10, interp_resolution: float = .3,
               loop_close: bool = True) -> None:
-    fig, ax = plt.subplots()
-    ax.imshow(image, cmap="Greys_r")
+
     boundaries: List[np.ndarray] = measure.find_contours(image)
     _perimeter: float = perimeter(image)
     for contour in boundaries:
@@ -128,8 +128,7 @@ def curvature(image: np.ndarray, boundary_point: int = 10, bp_tangent: int = 10,
             yn = np.append(yn, yi[0])
         shape_XY = np.asarray((xn, yn)).transpose()
         M: int = shape_XY.shape[0]
-        shape_curvature = _filled((1, M), float("nan"))
-        shape_uncutCurvature = _filled((1, M), float("nan"))
+        shape_curvature: np.ndarray = _filled((M,), float("nan"))
         shape_meanNegCurvature: float = float("nan")
         shape_numIndents: int = -1
         shape_tortuosity: float = float("nan")
@@ -159,7 +158,7 @@ def curvature(image: np.ndarray, boundary_point: int = 10, bp_tangent: int = 10,
 
             if slope12 == slope23:
                 # boundary is flat
-                shape_curvature[0, j] = 0
+                shape_curvature[j] = 0
             else:
                 # boundary is curved
                 x_center = (slope12 * slope23 * (point1[1] - point3[1]) + slope23 * (
@@ -167,15 +166,15 @@ def curvature(image: np.ndarray, boundary_point: int = 10, bp_tangent: int = 10,
                 midpoint12 = (point1 + point2) / 2
                 midpoint13 = (point1 + point3) / 2
                 y_center = (-1 / slope12) * (x_center - midpoint12[0]) + midpoint12[1]
-                shape_curvature[0, j] = shape_uncutCurvature[0, j] = 1 / np.sqrt(
+                shape_curvature[j] = 1 / np.sqrt(
                     (point1[0] - x_center) ** 2 + (point1[1] - y_center) ** 2)
                 in_poly = _in_polygon((midpoint13[0], midpoint13[1],), shape_XY[:, 0], shape_XY[:, 1])
-                if in_poly is _PointPolygonPosition.NOT:
-                    shape_uncutCurvature[0, j] = shape_curvature[0, j] = -1 * shape_curvature[0, j]
+                if in_poly is _PointPolygonPosition.OUT:
+                    shape_curvature[j] = - shape_curvature[j]
 
-                if in_poly is _PointPolygonPosition.ON or np.isinf(shape_uncutCurvature[0, j]):
-                    shape_curvature[0, j] = shape_uncutCurvature[0, j] = 0
-        list_curve = shape_uncutCurvature[:, :M - 1]
+                if in_poly is _PointPolygonPosition.ON or np.isinf(shape_curvature[j]):
+                    shape_curvature[j] = 0
+        list_curve = shape_curvature[:M - 1]
         list_neg_curve = abs(list_curve[list_curve < 0])
         if len(list_neg_curve):
             shape_meanNegCurvature = sum(list_neg_curve) / (M - 1)
@@ -184,10 +183,10 @@ def curvature(image: np.ndarray, boundary_point: int = 10, bp_tangent: int = 10,
         curve_mask = list_curve < 0
         curve_mask_labeled = measure.label(curve_mask)
         num_indents = np.max(curve_mask_labeled)
-        if curve_mask[0, 0] and curve_mask[0, -1]:
+        if curve_mask[0] and curve_mask[-1]:
             num_indents -= 1
         shape_numIndents = num_indents
-        shape_tortuosity = sum(np.gradient(shape_uncutCurvature[0, :M - 1]) ** 2) / _perimeter
+        shape_tortuosity = sum(np.gradient(shape_curvature[:M - 1]) ** 2) / _perimeter
         bp_positions_tangent = np.concatenate(
             (shape_XY[M - 1 - bp_tangent:M - 1, :], shape_XY[:M - 1, :], shape_XY[:bp_tangent + 1, :]))
 
@@ -195,9 +194,11 @@ def curvature(image: np.ndarray, boundary_point: int = 10, bp_tangent: int = 10,
             point1 = bp_positions_tangent[j, :]
             point2 = bp_positions_tangent[j + 2 * bp_tangent, :]
             shape_tangentAngle[0, j] = np.mod(math.atan2(point1[1] - point2[1], point1[0] - point2[0]), np.pi)
+        fig, ax = plt.subplots()
+        ax.imshow(image, cmap="Greys_r")
         plt.scatter(shape_XY[:, 0], shape_XY[:, 1], s=2,
-                    c=shape_curvature[0], cmap="Spectral")
-    plt.show()
+                    c=shape_curvature, cmap="Spectral_r")
+        plt.show()
 
 
 if __name__ == "__main__":
