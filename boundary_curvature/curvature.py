@@ -2,14 +2,13 @@ import math
 from enum import auto, Enum, unique
 from typing import Tuple, List, Type, Optional, TypeVar, Callable
 
-import matplotlib.pyplot as plt
 import numpy as np
-from scipy import interpolate
 from skimage import measure
-from skimage.measure._regionprops_utils import perimeter
 
 
 def _snakeinterp1(x: np.ndarray, y: np.ndarray, res: float) -> Tuple[np.ndarray, np.ndarray]:
+    from scipy import interpolate
+
     """
     % SNAKEINTERP1  Interpolate the snake to have equal distance RES
     %     [xi,yi] = snakeinterp(x,y,RES)
@@ -132,6 +131,8 @@ def num_indents(shape_XY: np.ndarray, shape_curvature: np.ndarray) -> int:
 
 
 def tortuosity(image: np.ndarray, shape_XY: np.ndarray, shape_curvature: np.ndarray):
+    from skimage.measure._regionprops_utils import perimeter
+
     _perimeter: float = perimeter(image)
     M: int = shape_XY.shape[0]
     return sum(np.gradient(shape_curvature[:M - 1]) ** 2) / _perimeter
@@ -213,5 +214,3 @@ def curvature(image: np.ndarray, boundary_point: int = 10, interp_resolution: fl
                     shape_curvature[j] = 0
         output.append((shape_XY, shape_curvature))
     return output
-
-
