@@ -9,7 +9,7 @@ from skimage import measure
 from skimage.measure._regionprops_utils import perimeter
 
 
-def _snakeinterp1d(x: np.ndarray, y: np.ndarray, res: float) -> Tuple[np.ndarray, np.ndarray]:
+def _snakeinterp1(x: np.ndarray, y: np.ndarray, res: float) -> Tuple[np.ndarray, np.ndarray]:
     """
     % SNAKEINTERP1  Interpolate the snake to have equal distance RES
     %     [xi,yi] = snakeinterp(x,y,RES)
@@ -110,17 +110,58 @@ def _in_polygon(point: Tuple[float, float], xv: np.ndarray, yv: np.ndarray,
     return _PointPolygonPosition.IN if rule.wn_is_in(wn) else _PointPolygonPosition.OUT
 
 
-def curvature(image: np.ndarray, boundary_point: int = 10, bp_tangent: int = 10, interp_resolution: float = .3,
-              loop_close: bool = True) -> None:
+def mean_neg_curvature(shape_XY: np.ndarray, shape_curvature: np.ndarray) -> float:
+    M: int = shape_XY.shape[0]
+    list_curve = shape_curvature[:M - 1]
+    list_neg_curve = abs(list_curve[list_curve < 0])
+    if len(list_neg_curve):
+        return sum(list_neg_curve) / (M - 1)
+    else:
+        return 0
 
-    boundaries: List[np.ndarray] = measure.find_contours(image)
+
+def num_indents(shape_XY: np.ndarray, shape_curvature: np.ndarray) -> int:
+    M: int = shape_XY.shape[0]
+    list_curve = shape_curvature[:M - 1]
+    curve_mask = list_curve < 0
+    curve_mask_labeled = measure.label(curve_mask)
+    num_indents: int = np.max(curve_mask_labeled)
+    if curve_mask[0] and curve_mask[-1]:
+        num_indents -= 1
+    return num_indents
+
+
+def tortuosity(image: np.ndarray, shape_XY: np.ndarray, shape_curvature: np.ndarray):
     _perimeter: float = perimeter(image)
+    M: int = shape_XY.shape[0]
+    return sum(np.gradient(shape_curvature[:M - 1]) ** 2) / _perimeter
+
+
+def shape_tangent_angles(shape_XY: np.ndarray, bp_tangent: int = 10) -> np.ndarray:
+    M: int = shape_XY.shape[0]
+
+    shape_tangent_angle: np.ndarray = _filled((M,), float("nan"))
+
+    bp_positions_tangent = np.concatenate(
+        (shape_XY[M - 1 - bp_tangent:M - 1, :], shape_XY[:M - 1, :], shape_XY[:bp_tangent + 1, :]))
+
+    for j in range(M):
+        point1 = bp_positions_tangent[j, :]
+        point2 = bp_positions_tangent[j + 2 * bp_tangent, :]
+        shape_tangent_angle[j] = np.mod(math.atan2(point1[1] - point2[1], point1[0] - point2[0]), np.pi)
+    return shape_tangent_angle
+
+
+def curvature(image: np.ndarray, boundary_point: int = 10, interp_resolution: float = .3,
+              loop_close: bool = True) -> List[Tuple[np.ndarray, np.ndarray]]:
+    output: List[Tuple[np.ndarray, np.ndarray]] = []
+    boundaries: List[np.ndarray] = measure.find_contours(image)
     for contour in boundaries:
         x, y = contour[:, 1], contour[:, 0]
         xn: np.ndarray = x + np.random.rand(len(x)) * 1e-8
         yn: np.ndarray = y + np.random.rand(len(x)) * 1e-8
 
-        xi, yi = _snakeinterp1d(xn, yn, interp_resolution)
+        xi, yi = _snakeinterp1(xn, yn, interp_resolution)
         xn = xi[::boundary_point]
         yn = yi[::boundary_point]
         if loop_close:
@@ -129,10 +170,6 @@ def curvature(image: np.ndarray, boundary_point: int = 10, bp_tangent: int = 10,
         shape_XY = np.asarray((xn, yn)).transpose()
         M: int = shape_XY.shape[0]
         shape_curvature: np.ndarray = _filled((M,), float("nan"))
-        shape_meanNegCurvature: float = float("nan")
-        shape_numIndents: int = -1
-        shape_tortuosity: float = float("nan")
-        shape_tangentAngle: np.ndarray = _filled((1, M), float("nan"))
 
         bp_positions = np.concatenate(
             (shape_XY[M - 1 - boundary_point:M - 1, :], shape_XY[:M - 1, :], shape_XY[:boundary_point + 1, :]))
@@ -174,34 +211,17 @@ def curvature(image: np.ndarray, boundary_point: int = 10, bp_tangent: int = 10,
 
                 if in_poly is _PointPolygonPosition.ON or np.isinf(shape_curvature[j]):
                     shape_curvature[j] = 0
-        list_curve = shape_curvature[:M - 1]
-        list_neg_curve = abs(list_curve[list_curve < 0])
-        if len(list_neg_curve):
-            shape_meanNegCurvature = sum(list_neg_curve) / (M - 1)
-        else:
-            shape_meanNegCurvature = 0
-        curve_mask = list_curve < 0
-        curve_mask_labeled = measure.label(curve_mask)
-        num_indents = np.max(curve_mask_labeled)
-        if curve_mask[0] and curve_mask[-1]:
-            num_indents -= 1
-        shape_numIndents = num_indents
-        shape_tortuosity = sum(np.gradient(shape_curvature[:M - 1]) ** 2) / _perimeter
-        bp_positions_tangent = np.concatenate(
-            (shape_XY[M - 1 - bp_tangent:M - 1, :], shape_XY[:M - 1, :], shape_XY[:bp_tangent + 1, :]))
-
-        for j in range(M):
-            point1 = bp_positions_tangent[j, :]
-            point2 = bp_positions_tangent[j + 2 * bp_tangent, :]
-            shape_tangentAngle[0, j] = np.mod(math.atan2(point1[1] - point2[1], point1[0] - point2[0]), np.pi)
-        fig, ax = plt.subplots()
-        ax.imshow(image, cmap="Greys_r")
-        plt.scatter(shape_XY[:, 0], shape_XY[:, 1], s=2,
-                    c=shape_curvature, cmap="Spectral_r")
-        plt.show()
+        output.append((shape_XY, shape_curvature))
+    return output
 
 
 if __name__ == "__main__":
     from skimage.io import imread
 
-    curvature(imread("blob.png")[..., 0] > 0)
+    img: np.ndarray = imread("blob.png")[..., 0] > 0
+    fig, ax = plt.subplots()
+    ax.imshow(img, cmap="Greys_r")
+    for shape_XY, shape_curvature in curvature(img):
+        plt.scatter(shape_XY[:, 0], shape_XY[:, 1], s=2,
+                    c=shape_curvature, cmap="Spectral_r")
+        plt.show()
